@@ -90,7 +90,7 @@ typedef struct {
     ngx_array_t *require_group;     /* array of ngx_http_complex_value_t */
     ngx_array_t *require_user;      /* array of ngx_http_complex_value_t */
     ngx_flag_t require_valid_user;
-    ngx_flag_t require_dialin;
+    ngx_flag_t require_dialin_check;
     ngx_http_complex_value_t require_valid_user_dn;
     ngx_flag_t satisfy_all;
     ngx_flag_t referral;
@@ -670,8 +670,8 @@ ngx_http_auth_ldap_parse_require(ngx_conf_t *cf, ngx_http_auth_ldap_server_t *se
             return "is duplicate";
         }
         target = &server->require_valid_user_dn;
-    } else if (ngx_strcmp(value[1].data, "dialin") == 0) {
-        server->require_dialin = 1;
+    } else if (ngx_strcmp(value[1].data, "dialin_check") == 0) {
+        server->require_dialin_check = 1;
         return NGX_CONF_OK;
     } else if (ngx_strcmp(value[1].data, "user") == 0) {
         if (server->require_user == NULL) {
@@ -2152,7 +2152,7 @@ ngx_http_auth_ldap_check_user(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *c
         }
     }
 
-    if (ctx->server->require_dialin) {
+    if (ctx->server->require_dialin_check) {
         char *attrs[] = { "msNPAllowDialin", NULL };
         LDAPMessage *res = NULL, *entry = NULL;
         struct berval **vals = NULL;
