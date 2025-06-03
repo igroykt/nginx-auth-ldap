@@ -224,6 +224,7 @@ static ngx_int_t ngx_http_auth_ldap_check_user(ngx_http_request_t *r, ngx_http_a
 static ngx_int_t ngx_http_auth_ldap_check_group(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx);
 static ngx_int_t ngx_http_auth_ldap_check_bind(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx);
 static ngx_int_t ngx_http_auth_ldap_recover_bind(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx);
+static ngx_int_t ngx_http_auth_ldap_check_dialin(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx);
 #if (NGX_OPENSSL)
 static ngx_int_t ngx_http_auth_ldap_restore_handlers(ngx_connection_t *conn);
 #endif
