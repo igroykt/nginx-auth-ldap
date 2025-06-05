@@ -41,6 +41,7 @@ Define list of your LDAP servers with required user/group requirements:
         group_attribute uniquemember;
         group_attribute_is_dn on;
         require valid_user;
+        require dialin_check on;
       }
 
       ldap_server test2 {
@@ -92,7 +93,7 @@ expected value: string
 expected value: on or off, default off
 
 ## require
-expected value: valid_user, user, group
+expected value: valid_user, user, group, dialin_check
 
 ## satisfy
 expected value: all, any
@@ -142,4 +143,3 @@ expected value: on, off
 LDAP library default is on. This option disables usage of referral messages from
 LDAP server. Useful for authenticating against read only AD server without access
 to read write.
-
