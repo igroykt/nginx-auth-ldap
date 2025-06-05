@@ -56,7 +56,6 @@
 #define LDAP_PROTO_UDP 2 /* reserved */
 #define LDAP_PROTO_IPC 3 /* ldapi:// */
 #define LDAP_PROTO_EXT 4 /* user-defined socket/sockbuf */
-#define LDAP_DEPRECATED 1
 
 extern int ldap_init_fd(ber_socket_t fd, int proto, const char *url, LDAP **ld);
 #endif
@@ -161,7 +160,9 @@ typedef struct {
     ngx_str_t error_msg;
     ngx_str_t dn;
     ngx_str_t user_dn;
+    ngx_str_t user_dialin;
     ngx_str_t group_dn;
+    int require_dialin_check;
 
     ngx_http_auth_ldap_cache_elt_t *cache_bucket;
     u_char cache_big_hash[16];
@@ -224,7 +225,6 @@ static ngx_int_t ngx_http_auth_ldap_check_user(ngx_http_request_t *r, ngx_http_a
 static ngx_int_t ngx_http_auth_ldap_check_group(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx);
 static ngx_int_t ngx_http_auth_ldap_check_bind(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx);
 static ngx_int_t ngx_http_auth_ldap_recover_bind(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx);
-static ngx_int_t ngx_http_auth_ldap_check_dialin(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx);
 #if (NGX_OPENSSL)
 static ngx_int_t ngx_http_auth_ldap_restore_handlers(ngx_connection_t *conn);
 #endif
@@ -286,6 +286,14 @@ static ngx_command_t ngx_http_auth_ldap_commands[] = {
         ngx_http_auth_ldap_servers,
         NGX_HTTP_LOC_CONF_OFFSET,
         0,
+        NULL
+    },
+    {
+        ngx_string("require_dialin_check"),
+        NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1,
+        ngx_conf_set_flag_slot,
+        NGX_HTTP_MAIN_CONF_OFFSET,
+        offsetof(ngx_http_auth_ldap_server_t, require_dialin_check),
         NULL
     },
     ngx_null_command
@@ -363,6 +371,7 @@ ngx_http_auth_ldap_ldap_server_block(ngx_conf_t *cf, ngx_command_t *cmd, void *c
     server->request_timeout = 10000;
     server->alias = name;
     server->referral = 1;
+    server->require_dialin_check = 0;
 
     save = *cf;
     cf->handler = ngx_http_auth_ldap_ldap_server;
@@ -457,6 +466,8 @@ ngx_http_auth_ldap_ldap_server(ngx_conf_t *cf, ngx_command_t *dummy, void *conf)
     else CONF_MSEC_VALUE(cf,value,server,request_timeout)
     else if (ngx_strcmp(value[0].data, "include") == 0) {
         return ngx_conf_include(cf, dummy, conf);
+    } else if (ngx_strcmp(value[0].data, "require_dialin_check") == 0 && ngx_strcmp(value[1].data, "on") == 0) {
+        server->require_dialin_check = 1;
     }
 
     rv = NGX_CONF_OK;
@@ -935,6 +946,7 @@ ngx_http_auth_ldap_check_cache(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *
     ngx_md5_t md5ctx;
     ngx_msec_t time_limit;
     ngx_uint_t i;
+    u_char msnp_val[2]; // To include msNPAllowDialin in hash
 
     ctx->cache_small_hash = ngx_murmur_hash2(r->headers_in.user.data, r->headers_in.user.len) ^ (uint32_t) (ngx_uint_t) server;
 
@@ -942,6 +954,11 @@ ngx_http_auth_ldap_check_cache(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *
     ngx_md5_update(&md5ctx, r->headers_in.user.data, r->headers_in.user.len);
     ngx_md5_update(&md5ctx, server, offsetof(ngx_http_auth_ldap_server_t, free_connections));
     ngx_md5_update(&md5ctx, r->headers_in.passwd.data, r->headers_in.passwd.len);
+    ngx_md5_final(ctx->cache_big_hash, &md5ctx);
+    // Include msNPAllowDialin requirement in cache key
+    msnp_val[0] = server->require_dialin_check ? '1' : '0';
+    msnp_val[1] = '\0';
+    ngx_md5_update(&md5ctx, msnp_val, 1);
     ngx_md5_final(ctx->cache_big_hash, &md5ctx);
 
     ctx->cache_bucket = &cache->buckets[ctx->cache_small_hash % cache->num_buckets];
@@ -1526,6 +1543,7 @@ ngx_http_auth_ldap_read_handler(ngx_event_t *rev)
     c->log->action = "reading response from LDAP";
 
     for (;;) {
+        ngx_log_error(NGX_LOG_ERR, rev->log, 0, "http_auth_ldap: read_handler called, state=%d", c->state);
         rc = ldap_result(c->ld, LDAP_RES_ANY, 0, &timeout, &result);
         if (rc < 0) {
             ngx_log_error(NGX_LOG_ERR, c->log, 0, "http_auth_ldap: ldap_result() failed (%d: %s)",
@@ -1618,6 +1636,28 @@ ngx_http_auth_ldap_read_handler(ngx_event_t *rev)
                             ngx_memcpy(c->rctx->dn.data, dn, c->rctx->dn.len + 1);
                             ldap_memfree(dn);
                         }
+                    }
+                    // Process msNPAllowDialin
+                    LDAPMessage *entry = ldap_first_entry(c->ld, result);
+                    if (entry) {
+                        BerElement *ber = NULL;
+                        char *attr = ldap_first_attribute(c->ld, entry, &ber);
+                        while (attr) {
+                            if (ngx_strcmp((u_char *)attr, "msNPAllowDialin") == 0) {
+                                struct berval **vals = ldap_get_values_len(c->ld, entry, attr);
+                                if (vals && vals[0]) {
+                                    if (ngx_strcmp((u_char *)vals[0]->bv_val, "TRUE") == 0) {
+                                        c->rctx->require_dialin_check = 1;
+                                    } else if (ngx_strcmp((u_char *)vals[0]->bv_val, "FALSE") == 0) {
+                                        c->rctx->require_dialin_check = 0;
+                                    }
+                                    ldap_value_free_len(vals);
+                                }
+                            }
+                            ldap_memfree(attr);
+                            attr = ldap_next_attribute(c->ld, entry, ber);
+                        }
+                        if (ber) ber_free(ber, 0);
                     }
                 } else if (ldap_msgtype(result) == LDAP_RES_SEARCH_RESULT) {
                     ngx_log_debug3(NGX_LOG_DEBUG_HTTP, c->log, 0, "http_auth_ldap: Received search result (%d: %s [%s])",
@@ -1837,6 +1877,7 @@ ngx_http_auth_ldap_handler(ngx_http_request_t *r)
             return NGX_HTTP_INTERNAL_SERVER_ERROR;
         }
         ctx->r = r;
+        ctx->require_dialin_check = -1;
         /* Other fields have been initialized to zero/NULL */
         ngx_http_set_ctx(r, ctx, ngx_http_auth_ldap_module);
     }
@@ -1847,53 +1888,6 @@ ngx_http_auth_ldap_handler(ngx_http_request_t *r)
 /**
  * Iteratively handle all phases of the authentication process, might be called many times
  */
-static ngx_int_t
-ngx_http_auth_ldap_check_dialin(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx)
-{
-    char *attrs[] = { "msNPAllowDialin", NULL };
-    LDAPMessage *res = NULL, *entry = NULL;
-    struct berval **vals = NULL;
-    int rc = ldap_search_ext_s(
-        ctx->c->ld,
-        (const char*)ctx->user_dn.data,
-        LDAP_SCOPE_BASE,
-        "(objectClass=*)",
-        attrs,
-        0,
-        NULL,
-        NULL,
-        NULL,
-        0,
-        &res
-    );
-    if (rc == LDAP_SUCCESS && res) {
-        entry = ldap_first_entry(ctx->c->ld, res);
-        if (entry) {
-            vals = ldap_get_values_len(ctx->c->ld, entry, "msNPAllowDialin");
-            if (!vals || vals[0] == NULL || ngx_strcmp((u_char*)vals[0]->bv_val, (u_char*)"TRUE") != 0) {
-                ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-                    "auth_ldap: user '%V' does not have dial-in permission", &r->headers_in.user);
-                if (vals) ldap_value_free_len(vals);
-                ldap_msgfree(res);
-                return NGX_HTTP_FORBIDDEN;
-            }
-            ldap_value_free_len(vals);
-        } else {
-            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-                "auth_ldap: user '%V' has no msNPAllowDialin attribute", &r->headers_in.user);
-            ldap_msgfree(res);
-            return NGX_HTTP_FORBIDDEN;
-        }
-        ldap_msgfree(res);
-    } else {
-        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-            "auth_ldap: LDAP search for msNPAllowDialin failed for user '%V'", &r->headers_in.user);
-        if (res) ldap_msgfree(res);
-        return NGX_HTTP_FORBIDDEN;
-    }
-    return NGX_OK;
-}
-
 static ngx_int_t
 ngx_http_auth_ldap_authenticate(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx,
         ngx_http_auth_ldap_loc_conf_t *conf)
@@ -1992,15 +1986,6 @@ ngx_http_auth_ldap_authenticate(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t 
                 ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: User DN is \"%V\"",
                     &ctx->user_dn);
 
-                if (ctx->server->require_dialin_check) {
-                    ngx_int_t dialin_ok = ngx_http_auth_ldap_check_dialin(r, ctx);
-                    if (dialin_ok != NGX_OK) {
-                        ctx->outcome = OUTCOME_DENY;
-                        ctx->phase = PHASE_NEXT;
-                        break;
-                    }
-                }
-
                 if (ctx->server->require_user != NULL) {
                     rc = ngx_http_auth_ldap_check_user(r, ctx);
                     if (rc != NGX_OK) {
@@ -2009,6 +1994,23 @@ ngx_http_auth_ldap_authenticate(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t 
                         ctx->phase = PHASE_NEXT;
                         break;
                     }
+                }
+
+                // Check msNPAllowDialin if required
+                if (ctx->server->require_dialin_check) {
+                    if (ctx->require_dialin_check == 0) { // Explicitly FALSE
+                        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: msNPAllowDialin is FALSE");
+                        ctx->outcome = OUTCOME_DENY;
+                        ctx->phase = PHASE_NEXT;
+                        break;
+                    } else if (ctx->require_dialin_check == -1) { // Unset
+                        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: msNPAllowDialin is unset");
+                        if (ctx->server->satisfy_all) {
+                            ctx->outcome = OUTCOME_DENY;
+                            ctx->phase = PHASE_NEXT;
+                            break;
+                        }
+                    } // TRUE (1) allows proceeding
                 }
 
                 /* User not yet fully authenticated, check group next */
@@ -2022,6 +2024,11 @@ ngx_http_auth_ldap_authenticate(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t 
 
                 /* No groups to validate, try binding next */
                 ctx->phase = PHASE_CHECK_BIND;
+                ctx->iteration = 0;
+                break;
+
+                ctx->phase = PHASE_CHECK_GROUP;
+                ctx->replied = 0;
                 ctx->iteration = 0;
                 break;
 
@@ -2122,7 +2129,7 @@ ngx_http_auth_ldap_search(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx)
 {
     LDAPURLDesc *ludpp;
     u_char *filter;
-    char *attrs[2];
+    char *attrs[3];
     ngx_int_t rc;
 
     /* On the first call, initiate the LDAP search operation */
@@ -2142,8 +2149,9 @@ ngx_http_auth_ldap_search(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx)
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: Search filter is \"%s\"",
             (const char *) filter);
 
-        attrs[0] = LDAP_NO_ATTRS;
-        attrs[1] = NULL;
+        attrs[0] = ludpp->lud_attrs[0];
+        attrs[1] = "msNPAllowDialin";
+        attrs[2] = NULL;
 
         rc = ldap_search_ext(ctx->c->ld, ludpp->lud_dn, ludpp->lud_scope, (const char *) filter, attrs, 0, NULL, NULL, NULL, 0, &ctx->c->msgid);
         if (rc != LDAP_SUCCESS) {
