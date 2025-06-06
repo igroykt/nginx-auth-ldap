@@ -1055,7 +1055,6 @@ ngx_http_auth_ldap_check_cache(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *
     ngx_md5_update(&md5ctx, r->headers_in.user.data, r->headers_in.user.len);
     ngx_md5_update(&md5ctx, server, offsetof(ngx_http_auth_ldap_server_t, free_connections));
     ngx_md5_update(&md5ctx, r->headers_in.passwd.data, r->headers_in.passwd.len);
-    ngx_md5_final(ctx->cache_big_hash, &md5ctx);
     // Include msNPAllowDialin requirement in cache key
     msnp_val[0] = server->require_dialin_check ? '1' : '0';
     msnp_val[1] = '\0';
