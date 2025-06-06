@@ -105,6 +105,13 @@ typedef struct {
     ngx_queue_t waiting_requests;
 } ngx_http_auth_ldap_server_t;
 
+typedef enum {
+    NGX_HTTP_AUTH_LDAP_TLS1,
+    NGX_HTTP_AUTH_LDAP_TLS1_1,
+    NGX_HTTP_AUTH_LDAP_TLS1_2,
+    NGX_HTTP_AUTH_LDAP_TLS1_3
+} ngx_http_auth_ldap_tls_version_e;
+
 typedef struct {
     ngx_array_t *servers;        /* array of ngx_http_auth_ldap_server_t */
     ngx_flag_t cache_enabled;
@@ -113,6 +120,7 @@ typedef struct {
     ngx_int_t servers_size;
 #if (NGX_OPENSSL)
     ngx_ssl_t ssl;
+    ngx_uint_t min_tls;
 #endif
 } ngx_http_auth_ldap_main_conf_t;
 
@@ -206,6 +214,7 @@ static char * ngx_http_auth_ldap_parse_url(ngx_conf_t *cf, ngx_http_auth_ldap_se
 static char * ngx_http_auth_ldap_parse_require(ngx_conf_t *cf, ngx_http_auth_ldap_server_t *server);
 static char * ngx_http_auth_ldap_parse_satisfy(ngx_conf_t *cf, ngx_http_auth_ldap_server_t *server);
 static char * ngx_http_auth_ldap_parse_referral(ngx_conf_t *cf, ngx_http_auth_ldap_server_t *server);
+static char * ngx_http_auth_ldap_set_min_tls(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static void * ngx_http_auth_ldap_create_main_conf(ngx_conf_t *cf);
 static char * ngx_http_auth_ldap_init_main_conf(ngx_conf_t *cf, void *parent);
 static void * ngx_http_auth_ldap_create_loc_conf(ngx_conf_t *);
@@ -271,6 +280,14 @@ static ngx_command_t ngx_http_auth_ldap_commands[] = {
         ngx_conf_set_num_slot,
         NGX_HTTP_MAIN_CONF_OFFSET,
         offsetof(ngx_http_auth_ldap_main_conf_t, servers_size),
+        NULL
+    },
+    {
+        ngx_string("auth_ldap_min_tls"),
+        NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1,
+        ngx_http_auth_ldap_set_min_tls,
+        NGX_HTTP_MAIN_CONF_OFFSET,
+        0,
         NULL
     },
     {
@@ -675,8 +692,20 @@ ngx_http_auth_ldap_parse_url(ngx_conf_t *cf, ngx_http_auth_ldap_server_t *server
     } else if (ngx_strcmp(server->ludpp->lud_scheme, "ldaps") == 0) {
         ngx_http_auth_ldap_main_conf_t *halmcf =
             ngx_http_conf_get_module_main_conf(cf, ngx_http_auth_ldap_module);
-        ngx_uint_t protos = NGX_SSL_SSLv2 | NGX_SSL_SSLv3 |
-            NGX_SSL_TLSv1 | NGX_SSL_TLSv1_1 | NGX_SSL_TLSv1_2;
+        ngx_uint_t protos = NGX_SSL_TLSv1 | NGX_SSL_TLSv1_1 | NGX_SSL_TLSv1_2;
+#ifdef NGX_SSL_TLSv1_3
+        protos |= NGX_SSL_TLSv1_3;
+#endif
+
+        if (halmcf->min_tls == NGX_HTTP_AUTH_LDAP_TLS1_1) {
+            protos &= ~NGX_SSL_TLSv1;
+        } else if (halmcf->min_tls == NGX_HTTP_AUTH_LDAP_TLS1_2) {
+            protos &= ~(NGX_SSL_TLSv1 | NGX_SSL_TLSv1_1);
+#ifdef NGX_SSL_TLSv1_3
+        } else if (halmcf->min_tls == NGX_HTTP_AUTH_LDAP_TLS1_3) {
+            protos &= ~(NGX_SSL_TLSv1 | NGX_SSL_TLSv1_1 | NGX_SSL_TLSv1_2);
+#endif
+        }
         if (halmcf->ssl.ctx == NULL && ngx_ssl_create(&halmcf->ssl, protos, halmcf) != NGX_OK) {
             return NGX_CONF_ERROR;
         }
@@ -795,6 +824,40 @@ ngx_http_auth_ldap_parse_referral(ngx_conf_t *cf, ngx_http_auth_ldap_server_t *s
     return NGX_CONF_ERROR;
 }
 
+static char *
+ngx_http_auth_ldap_set_min_tls(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+#if (NGX_OPENSSL)
+    ngx_http_auth_ldap_main_conf_t *mcf = conf;
+    ngx_str_t *value = cf->args->elts;
+
+    if (ngx_strcmp(value[1].data, "TLSv1") == 0) {
+        mcf->min_tls = NGX_HTTP_AUTH_LDAP_TLS1;
+        return NGX_CONF_OK;
+    }
+    if (ngx_strcmp(value[1].data, "TLSv1.1") == 0) {
+        mcf->min_tls = NGX_HTTP_AUTH_LDAP_TLS1_1;
+        return NGX_CONF_OK;
+    }
+    if (ngx_strcmp(value[1].data, "TLSv1.2") == 0) {
+        mcf->min_tls = NGX_HTTP_AUTH_LDAP_TLS1_2;
+        return NGX_CONF_OK;
+    }
+#ifdef NGX_SSL_TLSv1_3
+    if (ngx_strcmp(value[1].data, "TLSv1.3") == 0) {
+        mcf->min_tls = NGX_HTTP_AUTH_LDAP_TLS1_3;
+        return NGX_CONF_OK;
+    }
+#endif
+
+    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "http_auth_ldap: invalid TLS version '%V'", &value[1]);
+    return NGX_CONF_ERROR;
+#else
+    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "http_auth_ldap: TLS support is unavailable");
+    return NGX_CONF_ERROR;
+#endif
+}
+
 /**
  * Create main config which will store ldap_servers array
  */
@@ -812,6 +875,9 @@ ngx_http_auth_ldap_create_main_conf(ngx_conf_t *cf)
     conf->cache_expiration_time = NGX_CONF_UNSET_MSEC;
     conf->cache_size = NGX_CONF_UNSET_SIZE;
     conf->servers_size = NGX_CONF_UNSET;
+#if (NGX_OPENSSL)
+    conf->min_tls = NGX_CONF_UNSET_UINT;
+#endif
 
     return conf;
 }
@@ -827,6 +893,12 @@ ngx_http_auth_ldap_init_main_conf(ngx_conf_t *cf, void *parent)
     if (conf->cache_enabled == 0) {
         return NGX_CONF_OK;
     }
+
+#if (NGX_OPENSSL)
+    if (conf->min_tls == NGX_CONF_UNSET_UINT) {
+        conf->min_tls = NGX_HTTP_AUTH_LDAP_TLS1_2;
+    }
+#endif
 
     if (conf->cache_size == NGX_CONF_UNSET_SIZE) {
         conf->cache_size = 100;
@@ -2219,11 +2291,9 @@ ngx_http_auth_ldap_search(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx)
         filter = ngx_pcalloc(
             r->pool,
             (ludpp->lud_filter != NULL ? ngx_strlen(ludpp->lud_filter) : ngx_strlen("(objectClass=*)")) +
-            //ngx_strlen("(&(=))") + ngx_strlen(ludpp->lud_attrs[0]) + r->headers_in.user.len + 1);
             ngx_strlen("(&(=))") + ngx_strlen(ludpp->lud_attrs[0]) + esc_user.len + 1);
         ngx_sprintf(filter, "(&%s(%s=%V))%Z",
                 ludpp->lud_filter != NULL ? ludpp->lud_filter : "(objectClass=*)",
-                //ludpp->lud_attrs[0], &r->headers_in.user);
                 ludpp->lud_attrs[0], &esc_user);
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: Search filter is \"%s\"",
             (const char *) filter);
@@ -2377,18 +2447,8 @@ ngx_http_auth_ldap_check_group(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *
     cn_gr = gr;
 
     if (ctx->server->group_attribute_dn == 1) {
-        /*user_val = ngx_pcalloc(
-            r->pool,
-            ctx->user_dn.len + 1);
-        ngx_memcpy(user_val, ctx->user_dn.data, ctx->user_dn.len);
-        user_val[ctx->user_dn.len] = '\0';*/
         user_src = ctx->user_dn;
     } else {
-        /*user_val = ngx_pcalloc(
-            r->pool,
-            r->headers_in.user.len + 1);
-        ngx_memcpy(user_val, r->headers_in.user.data, r->headers_in.user.len);
-        user_val[r->headers_in.user.len] = '\0';*/
         user_src = r->headers_in.user;
     }
     if (ngx_http_auth_ldap_escape(r->pool, &user_src, &esc_user) != NGX_OK) {
@@ -2406,7 +2466,6 @@ ngx_http_auth_ldap_check_group(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: group_attribute.data is \"%V\" so calling a failure here", ctx->server->group_attribute.data);
         rc = !LDAP_SUCCESS;
     } else {
-        //for_filter = ngx_strlen(cn_gr) + ctx->server->group_attribute.len + ngx_strlen((const char *) user_val) + ngx_strlen("(&()(=))") + 1;
         for_filter = ngx_strlen(cn_gr) + ctx->server->group_attribute.len + esc_user.len + ngx_strlen("(&()(=))") + 1;
         filter = ngx_pcalloc(
             r->pool,
