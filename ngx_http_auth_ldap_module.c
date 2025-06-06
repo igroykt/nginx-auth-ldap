@@ -225,6 +225,7 @@ static ngx_int_t ngx_http_auth_ldap_check_user(ngx_http_request_t *r, ngx_http_a
 static ngx_int_t ngx_http_auth_ldap_check_group(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx);
 static ngx_int_t ngx_http_auth_ldap_check_bind(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx);
 static ngx_int_t ngx_http_auth_ldap_recover_bind(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx);
+static ngx_int_t ngx_http_auth_ldap_escape(ngx_pool_t *pool, ngx_str_t *src, ngx_str_t *dst);
 #if (NGX_OPENSSL)
 static ngx_int_t ngx_http_auth_ldap_restore_handlers(ngx_connection_t *conn);
 #endif
@@ -2153,6 +2154,49 @@ ngx_http_auth_ldap_authenticate(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t 
 }
 
 static ngx_int_t
+ngx_http_auth_ldap_escape(ngx_pool_t *pool, ngx_str_t *src, ngx_str_t *dst)
+{
+    u_char      *p, *d;
+    size_t       i;
+
+    dst->len = src->len * 3;
+    dst->data = ngx_pnalloc(pool, dst->len + 1);
+    if (dst->data == NULL) {
+        return NGX_ERROR;
+    }
+
+    p = src->data;
+    d = dst->data;
+    for (i = 0; i < src->len; i++) {
+        switch (p[i]) {
+        case '(':
+            d = ngx_cpymem(d, "\\28", 3);
+            break;
+        case ')':
+            d = ngx_cpymem(d, "\\29", 3);
+            break;
+        case '*':
+            d = ngx_cpymem(d, "\\2a", 3);
+            break;
+        case '\\':
+            d = ngx_cpymem(d, "\\5c", 3);
+            break;
+        case '\0':
+            d = ngx_cpymem(d, "\\00", 3);
+            break;
+        default:
+            *d++ = p[i];
+            break;
+        }
+    }
+
+    dst->len = d - dst->data;
+    *d = '\0';
+
+    return NGX_OK;
+}
+
+static ngx_int_t
 ngx_http_auth_ldap_search(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx)
 {
     LDAPURLDesc *ludpp;
@@ -2167,13 +2211,20 @@ ngx_http_auth_ldap_search(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx)
         }
 
         ludpp = ctx->server->ludpp;
+        ngx_str_t esc_user;
+        if (ngx_http_auth_ldap_escape(r->pool, &r->headers_in.user, &esc_user) != NGX_OK) {
+            ngx_http_auth_ldap_return_connection(ctx->c);
+            return NGX_ERROR;
+        }
         filter = ngx_pcalloc(
             r->pool,
             (ludpp->lud_filter != NULL ? ngx_strlen(ludpp->lud_filter) : ngx_strlen("(objectClass=*)")) +
-            ngx_strlen("(&(=))") + ngx_strlen(ludpp->lud_attrs[0]) + r->headers_in.user.len + 1);
+            //ngx_strlen("(&(=))") + ngx_strlen(ludpp->lud_attrs[0]) + r->headers_in.user.len + 1);
+            ngx_strlen("(&(=))") + ngx_strlen(ludpp->lud_attrs[0]) + esc_user.len + 1);
         ngx_sprintf(filter, "(&%s(%s=%V))%Z",
                 ludpp->lud_filter != NULL ? ludpp->lud_filter : "(objectClass=*)",
-                ludpp->lud_attrs[0], &r->headers_in.user);
+                //ludpp->lud_attrs[0], &r->headers_in.user);
+                ludpp->lud_attrs[0], &esc_user);
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: Search filter is \"%s\"",
             (const char *) filter);
 
@@ -2255,6 +2306,7 @@ ngx_http_auth_ldap_check_group(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *
     ngx_int_t rc;
     u_char *filter;
     char *user_val;
+    ngx_str_t user_src, esc_user;
     char *attrs[2];
     size_t for_filter;
 
@@ -2325,18 +2377,28 @@ ngx_http_auth_ldap_check_group(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *
     cn_gr = gr;
 
     if (ctx->server->group_attribute_dn == 1) {
-        user_val = ngx_pcalloc(
+        /*user_val = ngx_pcalloc(
             r->pool,
             ctx->user_dn.len + 1);
         ngx_memcpy(user_val, ctx->user_dn.data, ctx->user_dn.len);
-        user_val[ctx->user_dn.len] = '\0';
+        user_val[ctx->user_dn.len] = '\0';*/
+        user_src = ctx->user_dn;
     } else {
-        user_val = ngx_pcalloc(
+        /*user_val = ngx_pcalloc(
             r->pool,
             r->headers_in.user.len + 1);
         ngx_memcpy(user_val, r->headers_in.user.data, r->headers_in.user.len);
-        user_val[r->headers_in.user.len] = '\0';
+        user_val[r->headers_in.user.len] = '\0';*/
+        user_src = r->headers_in.user;
     }
+    if (ngx_http_auth_ldap_escape(r->pool, &user_src, &esc_user) != NGX_OK) {
+        ctx->outcome = OUTCOME_ERROR;
+        ngx_http_auth_ldap_return_connection(ctx->c);
+        return NGX_ERROR;
+    }
+    user_val = ngx_pcalloc(r->pool, esc_user.len + 1);
+    ngx_memcpy(user_val, esc_user.data, esc_user.len);
+    user_val[esc_user.len] = '\0';
 
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: Search user in group \"%V\"", &val);
 
@@ -2344,7 +2406,8 @@ ngx_http_auth_ldap_check_group(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: group_attribute.data is \"%V\" so calling a failure here", ctx->server->group_attribute.data);
         rc = !LDAP_SUCCESS;
     } else {
-        for_filter = ngx_strlen(cn_gr) + ctx->server->group_attribute.len + ngx_strlen((const char *) user_val) + ngx_strlen("(&()(=))") + 1;
+        //for_filter = ngx_strlen(cn_gr) + ctx->server->group_attribute.len + ngx_strlen((const char *) user_val) + ngx_strlen("(&()(=))") + 1;
+        for_filter = ngx_strlen(cn_gr) + ctx->server->group_attribute.len + esc_user.len + ngx_strlen("(&()(=))") + 1;
         filter = ngx_pcalloc(
             r->pool,
             for_filter);
