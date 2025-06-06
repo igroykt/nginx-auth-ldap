@@ -137,6 +137,12 @@ Trust all CA certificates in this directory (see ssl_check_cert above).
 Note that you need to provide hash-based symlinks in the directory for this to work;
 you'll basically need to run OpenSSL's c_rehash command in this directory.
 
+## auth_ldap_min_tls
+expected value: TLSv1, TLSv1.1, TLSv1.2, or TLSv1.3, default TLSv1.2
+
+Set the minimum TLS version used for LDAPS connections. Protocols older than the
+configured value are disabled.
+
 ## referral
 expected value: on, off
 
