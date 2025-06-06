@@ -416,6 +416,10 @@ ngx_http_auth_ldap_ldap_server(ngx_conf_t *cf, ngx_command_t *dummy, void *conf)
     if (ngx_strcmp(value[0].data, "url") == 0) {
         return ngx_http_auth_ldap_parse_url(cf, server);
     } else if (ngx_strcmp(value[0].data, "binddn") == 0) {
+        if (value[1].len == 0) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "http_auth_ldap: Empty bind DN is not allowed");
+            return NGX_CONF_ERROR;
+        }
         server->bind_dn = value[1];
     } else if (ngx_strcmp(value[0].data, "binddn_passwd") == 0) {
         server->bind_dn_passwd = value[1];
@@ -568,6 +572,7 @@ ngx_http_auth_ldap_parse_url(ngx_conf_t *cf, ngx_http_auth_ldap_server_t *server
 {
     ngx_str_t *value;
     u_char *p;
+    size_t len;
 
     value = cf->args->elts;
 
@@ -617,16 +622,39 @@ ngx_http_auth_ldap_parse_url(ngx_conf_t *cf, ngx_http_auth_ldap_server_t *server
         return NGX_CONF_ERROR;
     }
 
-    if (server->ludpp->lud_attrs == NULL) {
+    if (server->ludpp->lud_attrs == NULL || server->ludpp->lud_attrs[0] == NULL) {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "http_auth_ldap: No user attribute specified in auth_ldap_url.");
         return NGX_CONF_ERROR;
     }
 
-    server->url.data = ngx_palloc(cf->pool, ngx_strlen(server->ludpp->lud_scheme) + sizeof("://") - 1 +
-        ngx_strlen(server->ludpp->lud_host) + sizeof(":65535"));
-    p = ngx_sprintf(server->url.data, "%s://%s:%d%Z", server->ludpp->lud_scheme, server->ludpp->lud_host,
-        server->ludpp->lud_port);
-    server->url.len = p - server->url.data - 1;
+    // Calculate the required buffer size
+    len = ngx_strlen(server->ludpp->lud_scheme) + sizeof("://") - 1 +
+          ngx_strlen(server->ludpp->lud_host) + sizeof(":65535");
+    
+    // Allocate memory for the URL
+    server->url.data = ngx_palloc(cf->pool, len);
+    if (server->url.data == NULL) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "http_auth_ldap: Memory allocation failed for URL");
+        return NGX_CONF_ERROR;
+    }
+
+    // Set the URL length before formatting
+    server->url.len = len - 1; // Exclude null terminator from length
+
+    // Format the URL
+    p = ngx_snprintf(server->url.data, len, "%s://%s:%d",
+                     server->ludpp->lud_scheme, server->ludpp->lud_host,
+                     server->ludpp->lud_port);
+    
+    // Verify the written length
+    server->url.len = p - server->url.data;
+    if (server->url.len >= len) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "http_auth_ldap: URL buffer overflow");
+        return NGX_CONF_ERROR;
+    }
+
+    // Ensure null termination
+    server->url.data[server->url.len] = '\0';
 
     ngx_memzero(&server->parsed_url, sizeof(ngx_url_t));
     server->parsed_url.url.data = (u_char *) server->ludpp->lud_host;
