@@ -94,6 +94,8 @@ typedef struct {
     ngx_flag_t satisfy_all;
     ngx_flag_t referral;
 
+    ngx_array_t *net_rules;        /* array of ngx_http_auth_ldap_rule_t */
+
     ngx_uint_t connections;
     ngx_uint_t max_down_retries;
     ngx_uint_t max_down_retries_count;
@@ -104,6 +106,10 @@ typedef struct {
     ngx_queue_t free_connections;
     ngx_queue_t waiting_requests;
 } ngx_http_auth_ldap_server_t;
+
+typedef struct {
+    ngx_cidr_t cidr;
+} ngx_http_auth_ldap_rule_t;
 
 typedef enum {
     NGX_HTTP_AUTH_LDAP_TLS1,
@@ -234,6 +240,8 @@ static ngx_int_t ngx_http_auth_ldap_check_user(ngx_http_request_t *r, ngx_http_a
 static ngx_int_t ngx_http_auth_ldap_check_group(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx);
 static ngx_int_t ngx_http_auth_ldap_check_bind(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx);
 static ngx_int_t ngx_http_auth_ldap_recover_bind(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx);
+static ngx_int_t ngx_http_auth_ldap_ip_access(ngx_http_request_t *r, ngx_http_auth_ldap_server_t *server);
+static ngx_int_t ngx_http_auth_ldap_cidr_match(struct sockaddr *sa, ngx_cidr_t *cidr);
 static ngx_int_t ngx_http_auth_ldap_escape(ngx_pool_t *pool, ngx_str_t *src, ngx_str_t *dst);
 #if (NGX_OPENSSL)
 static ngx_int_t ngx_http_auth_ldap_restore_handlers(ngx_connection_t *conn);
@@ -312,6 +320,14 @@ static ngx_command_t ngx_http_auth_ldap_commands[] = {
         ngx_conf_set_flag_slot,
         NGX_HTTP_MAIN_CONF_OFFSET,
         offsetof(ngx_http_auth_ldap_server_t, require_dialin_check),
+        NULL
+    },
+    {
+        ngx_string("ldap_allow"),
+        NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1,
+        ngx_http_auth_ldap_ldap_server,
+        NGX_HTTP_MAIN_CONF_OFFSET,
+        0,
         NULL
     },
     ngx_null_command
@@ -451,6 +467,36 @@ ngx_http_auth_ldap_ldap_server(ngx_conf_t *cf, ngx_command_t *dummy, void *conf)
         return ngx_http_auth_ldap_parse_satisfy(cf, server);
     } else if (ngx_strcmp(value[0].data, "referral") == 0) {
         return ngx_http_auth_ldap_parse_referral(cf, server);
+    } else if (ngx_strcmp(value[0].data, "ldap_allow") == 0) {
+        ngx_http_auth_ldap_rule_t    *rule;
+        ngx_cidr_t                    cidr;
+
+        if (ngx_strcmp(value[1].data, "all") == 0) {
+            ngx_memzero(&cidr, sizeof(ngx_cidr_t));
+            cidr.family = AF_UNSPEC;
+        } else {
+            if (ngx_ptocidr(&value[1], &cidr) != NGX_OK) {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "http_auth_ldap: invalid network \"%V\"",
+                                   &value[1]);
+                return NGX_CONF_ERROR;
+            }
+        }
+
+        if (server->net_rules == NULL) {
+            server->net_rules = ngx_array_create(cf->pool, 4,
+                                                 sizeof(ngx_http_auth_ldap_rule_t));
+            if (server->net_rules == NULL) {
+                return NGX_CONF_ERROR;
+            }
+        }
+
+        rule = ngx_array_push(server->net_rules);
+        if (rule == NULL) {
+            return NGX_CONF_ERROR;
+        }
+
+        rule->cidr = cidr;
     } else if (ngx_strcmp(value[0].data, "max_down_retries") == 0) {
         i = ngx_atoi(value[1].data, value[1].len);
         if (i == NGX_ERROR) {
@@ -1954,6 +2000,26 @@ ngx_http_auth_ldap_handler(ngx_http_request_t *r)
         return ngx_http_auth_ldap_set_realm(r, &alcf->realm);
     }
 
+    /* check network-based allow rule before requesting credentials */
+    if (alcf->servers != NULL) {
+        ngx_uint_t i;
+        ngx_int_t  rc_rule;
+        ngx_http_auth_ldap_server_t **servers;
+
+        servers = alcf->servers->elts;
+        for (i = 0; i < alcf->servers->nelts; i++) {
+            if (servers[i]->net_rules != NULL) {
+                rc_rule = ngx_http_auth_ldap_ip_access(r, servers[i]);
+                if (rc_rule == NGX_OK) {
+                    return NGX_OK;
+                }
+                if (rc_rule == NGX_HTTP_FORBIDDEN) {
+                    return NGX_HTTP_FORBIDDEN;
+                }
+            }
+        }
+    }
+
     ctx = ngx_http_get_module_ctx(r, ngx_http_auth_ldap_module);
     if (ctx == NULL) {
         rc = ngx_http_auth_basic_user(r);
@@ -2032,6 +2098,15 @@ ngx_http_auth_ldap_authenticate(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t 
             case PHASE_START:
                 ctx->server = ((ngx_http_auth_ldap_server_t **) conf->servers->elts)[ctx->server_index];
                 ctx->outcome = OUTCOME_UNCERTAIN;
+
+                if (ctx->server->net_rules != NULL) {
+                    rc = ngx_http_auth_ldap_ip_access(r, ctx->server);
+                    if (rc == NGX_HTTP_FORBIDDEN || rc == NGX_OK) {
+                        ctx->outcome = (rc == NGX_OK) ? OUTCOME_ALLOW : OUTCOME_DENY;
+                        ctx->phase = PHASE_NEXT;
+                        break;
+                    }
+                }
 
                 ngx_add_timer(r->connection->write, ctx->server->request_timeout);
                 ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: request_timeout=%d",ctx->server->request_timeout);
@@ -2575,4 +2650,67 @@ ngx_http_auth_ldap_recover_bind(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t 
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: binddn bind successful");
     }
     return NGX_OK;
+}
+
+static ngx_int_t
+ngx_http_auth_ldap_cidr_match(struct sockaddr *sa, ngx_cidr_t *cidr)
+{
+    u_char      *p, *m, *a;
+    ngx_uint_t   i;
+
+    if (cidr->family == AF_UNSPEC) {
+        return 1;
+    }
+
+    if (sa->sa_family != cidr->family) {
+        return 0;
+    }
+
+    if (sa->sa_family == AF_INET) {
+        struct sockaddr_in *sin = (struct sockaddr_in *) sa;
+        if ((sin->sin_addr.s_addr & cidr->u.in.mask) == cidr->u.in.addr) {
+            return 1;
+        }
+        return 0;
+    }
+
+#if (NGX_HAVE_INET6)
+    if (sa->sa_family == AF_INET6) {
+        struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *) sa;
+
+        a = sin6->sin6_addr.s6_addr;
+        p = cidr->u.in6.addr.s6_addr;
+        m = cidr->u.in6.mask.s6_addr;
+
+        for (i = 0; i < 16; i++) {
+            if ((a[i] & m[i]) != p[i]) {
+                return 0;
+            }
+        }
+
+        return 1;
+    }
+#endif
+
+    return 0;
+}
+
+static ngx_int_t
+ngx_http_auth_ldap_ip_access(ngx_http_request_t *r, ngx_http_auth_ldap_server_t *server)
+{
+    ngx_http_auth_ldap_rule_t *rule;
+    ngx_uint_t                 i;
+
+    if (server->net_rules == NULL) {
+        return NGX_DECLINED; /* No rules, deny by default */
+    }
+
+    rule = server->net_rules->elts;
+    for (i = 0; i < server->net_rules->nelts; i++) {
+        if (ngx_http_auth_ldap_cidr_match(r->connection->sockaddr, &rule[i].cidr)) {
+            return NGX_OK; /* Match found, allow access */
+        }
+    }
+
+    return NGX_DECLINED; /* No match, deny access */
 }
