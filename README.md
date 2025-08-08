@@ -21,7 +21,6 @@ Define list of your LDAP servers with required user/group requirements:
         binddn_passwd LDAPPASSWORD;
         auth_ldap_filter "(sAMAccountName=%s)";
         auth_ldap_sizelimit 1;
-        auth_ldap_timeout 30000;
         auth_ldap_min_tls TLSv1.3;
         group_attribute uniquemember;
         group_attribute_is_dn on;
