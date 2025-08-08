@@ -27,6 +27,8 @@ Define list of your LDAP servers with required user/group requirements:
         group_attribute_is_dn on;
         require valid_user;
         require dialin_check on;
+        ldap_allow 192.168.1.0/23;
+        ldap_allow 10.8.0.0/24;
       }
 
       ldap_server test2 {
@@ -128,14 +130,14 @@ expected value: TLSv1, TLSv1.1, TLSv1.2, or TLSv1.3, default TLSv1.2
 Set the minimum TLS version used for LDAPS connections. Protocols older than the
 configured value are disabled.
 
-# ldap_allow
-expected value: network (CIDR) or `all`
-
-Controls client access based on IP address before LDAP authentication. Rules are evaluated in the order they are defined, and the first matching rule is used.
-
 ## referral
 expected value: on, off
 
 LDAP library default is on. This option disables usage of referral messages from
 LDAP server. Useful for authenticating against read only AD server without access
 to read write.
+
+# ldap_allow
+expected value: network (CIDR) or `all`
+
+Controls client access based on IP address before LDAP authentication. Rules are evaluated in the order they are defined, and the first matching rule is used.
