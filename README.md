@@ -15,7 +15,7 @@ Define list of your LDAP servers with required user/group requirements:
 ```bash
     http {
       ldap_server test1 {
-        url ldaps://192.168.0.1:636/DC=test,DC=local?sAMAccountName?sub;
+        url ldaps://192.168.0.9:636/DC=test,DC=local?sAMAccountName?sub;
         ssl_ca_file /usr/local/etc/ssl/ca.pem;
         binddn "TEST\\LDAPUSER";
         binddn_passwd LDAPPASSWORD;
@@ -27,7 +27,7 @@ Define list of your LDAP servers with required user/group requirements:
         group_attribute_is_dn on;
         require valid_user;
         require dialin_check on;
-        ldap_allow 192.168.1.0/23;
+        ldap_allow 192.168.0.0/23;
         ldap_allow 10.8.0.0/24;
       }
 
