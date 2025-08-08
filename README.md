@@ -3,17 +3,10 @@ LDAP module for nginx which supports authentication against multiple LDAP server
 
 # How to install
 
-## Linux
-
 ```bash
-cd ~ && git clone https://github.com/kvspb/nginx-auth-ldap.git   
-```
-
-in nginx source folder
-
-```bash
-./configure --add-module=path_to_http_auth_ldap_module
-make install
+cd ~ && git clone https://github.com/kvspb/nginx-auth-ldap.git
+./configure --add-module=../nginx-auth-ldap
+make && make install
 ```
 
 # Example configuration
@@ -22,7 +15,7 @@ Define list of your LDAP servers with required user/group requirements:
 ```bash
     http {
       ldap_server test1 {
-        url ldaps://192.168.0.1:3268/DC=test,DC=local?sAMAccountName?sub;
+        url ldaps://192.168.0.1:636/DC=test,DC=local?sAMAccountName?sub;
         ssl_ca_file /usr/local/etc/ssl/ca.pem;
         binddn "TEST\\LDAPUSER";
         binddn_passwd LDAPPASSWORD;
