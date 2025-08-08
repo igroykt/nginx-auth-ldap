@@ -3,19 +3,6 @@ LDAP module for nginx which supports authentication against multiple LDAP server
 
 # How to install
 
-## FreeBSD
-
-```bash
-cd /usr/ports/www/nginx && make config install clean
-```
-
-Check HTTP_AUTH_LDAP options
-
-
-```
-[*] HTTP_AUTH_LDAP        3rd party http_auth_ldap module
-```
-
 ## Linux
 
 ```bash
@@ -35,9 +22,14 @@ Define list of your LDAP servers with required user/group requirements:
 ```bash
     http {
       ldap_server test1 {
-        url ldap://192.168.0.1:3268/DC=test,DC=local?sAMAccountName?sub?(objectClass=person);
+        url ldaps://192.168.0.1:3268/DC=test,DC=local?sAMAccountName?sub;
+        ssl_ca_file /usr/local/etc/ssl/ca.pem;
         binddn "TEST\\LDAPUSER";
         binddn_passwd LDAPPASSWORD;
+        auth_ldap_filter "(sAMAccountName=%s)";
+        auth_ldap_sizelimit 1;
+        auth_ldap_timeout 30000;
+        auth_ldap_min_tls TLSv1.3;
         group_attribute uniquemember;
         group_attribute_is_dn on;
         require valid_user;
@@ -63,7 +55,7 @@ And add required servers in correct order into your location/server directive:
 
         auth_ldap "Forbidden";
         auth_ldap_servers test1;
-		auth_ldap_servers test2;
+        auth_ldap_servers test2;
 
         location / {
             root   html;
@@ -142,6 +134,11 @@ expected value: TLSv1, TLSv1.1, TLSv1.2, or TLSv1.3, default TLSv1.2
 
 Set the minimum TLS version used for LDAPS connections. Protocols older than the
 configured value are disabled.
+
+# ldap_allow
+expected value: network (CIDR) or `all`
+
+Controls client access based on IP address before LDAP authentication. Rules are evaluated in the order they are defined, and the first matching rule is used.
 
 ## referral
 expected value: on, off
