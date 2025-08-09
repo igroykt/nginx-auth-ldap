@@ -4,7 +4,7 @@ LDAP module for nginx which supports authentication against multiple LDAP server
 # How to install
 
 ```bash
-git clone https://github.com/kvspb/nginx-auth-ldap.git
+git clone https://github.com/igroykt/nginx-auth-ldap.git
 ./configure --add-module=/path/to/nginx-auth-ldap
 make && make install
 ```
