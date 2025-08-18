@@ -136,7 +136,7 @@ LDAP library default is on. This option disables usage of referral messages from
 LDAP server. Useful for authenticating against read only AD server without access
 to read write.
 
-# ldap_allow
+## ldap_allow
 expected value: network (CIDR) or `all`
 
 Controls client access based on IP address before LDAP authentication. Rules are evaluated in the order they are defined, and the first matching rule is used.
